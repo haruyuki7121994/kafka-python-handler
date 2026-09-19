@@ -8,6 +8,8 @@ Description: Python Lambda producer and consumer for the news feed Kafka topic. 
 # dynamodb:GetItem, dynamodb:UpdateItem on the outboxes table;
 # dynamodb:DescribeStream, dynamodb:GetRecords, dynamodb:GetShardIterator,
 # dynamodb:ListStreams on the outboxes stream;
+# dynamodb:GetItem on the users table and dynamodb:Query on the followers table;
+# sqs:SendMessage on the fanout queue;
 # kms:Decrypt if the secrets use a customer-managed KMS key.
 # The deploying principal needs iam:PassRole for this existing role.
 Parameters:
@@ -29,6 +31,21 @@ Parameters:
   OutboxTableName:
     Type: String
     Default: outboxes
+  UsersTableName:
+    Type: String
+    Default: users
+  FollowersTableName:
+    Type: String
+    Default: followers
+  CelebrityThreshold:
+    Type: Number
+    Default: 100000
+    MinValue: 1
+  FanoutBatchSize:
+    Type: Number
+    Default: 500
+    MinValue: 1
+    MaxValue: 500
   KafkaBootstrapServers:
     Type: CommaDelimitedList
     Default: kafka-webapp-adapham712-1bb4.k.aivencloud.com:20495
@@ -64,6 +81,22 @@ Conditions:
   EnableTrigger: !Equals [!Ref TriggerEnabled, 'true']
 
 Resources:
+  FanoutDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${AWS::StackName}-fanout-dlq'
+      MessageRetentionPeriod: 1209600
+
+  FanoutQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${AWS::StackName}-fanout'
+      VisibilityTimeout: 360
+      MessageRetentionPeriod: 1209600
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt FanoutDeadLetterQueue.Arn
+        maxReceiveCount: 5
+
   ProducerLogGroup:
     Type: AWS::Logs::LogGroup
     DeletionPolicy: Retain
@@ -124,9 +157,16 @@ Resources:
       Handler: lambda_function_consumer.lambda_handler
       Role: !Ref ExistingLambdaRoleArn
       MemorySize: 256
-      Timeout: 60
+      Timeout: 120
       LoggingConfig:
         LogGroup: !Ref ConsumerLogGroup
+      Environment:
+        Variables:
+          USERS_TABLE_NAME: !Ref UsersTableName
+          FOLLOWERS_TABLE_NAME: !Ref FollowersTableName
+          FANOUT_QUEUE_URL: !Ref FanoutQueue
+          CELEBRITY_THRESHOLD: !Ref CelebrityThreshold
+          FANOUT_BATCH_SIZE: !Ref FanoutBatchSize
       Code:
         S3Bucket: !Ref CodeBucket
         S3Key: !Sub 'news-feed/kafka/deploy/${DeploymentVersion}.zip'
@@ -136,7 +176,7 @@ Resources:
     Properties:
       FunctionName: !Ref ConsumerFunction
       Enabled: !If [EnableTrigger, true, false]
-      BatchSize: 10
+      BatchSize: 1
       MaximumBatchingWindowInSeconds: 1
       StartingPosition: !Ref StartingPosition
       Topics:
@@ -155,6 +195,12 @@ Resources:
       # All advertised brokers must be publicly reachable and pass TLS checks.
 
 Outputs:
+  FanoutQueueUrl:
+    Value: !Ref FanoutQueue
+  FanoutQueueArn:
+    Value: !GetAtt FanoutQueue.Arn
+  FanoutDeadLetterQueueUrl:
+    Value: !Ref FanoutDeadLetterQueue
   ProducerFunctionName:
     Value: !Ref ProducerFunction
   ProducerFunctionArn:
