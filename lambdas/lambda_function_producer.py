@@ -143,6 +143,7 @@ def _publish(record):
 
 
 def lambda_handler(event, context):
+    log.info("Full request: %s", json.dumps(event, ensure_ascii=False))
     for record in event.get("Records", []):
         try:
             _publish(record)
