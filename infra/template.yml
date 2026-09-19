@@ -1,0 +1,120 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Python Lambda consumer for public Aiven Kafka using SASL PLAIN over TLS. Deploy in ap-southeast-1.
+
+# Uses an existing role; this template creates or modifies no IAM resources.
+# The role must trust lambda.amazonaws.com and already allow:
+# logs:CreateLogStream, logs:PutLogEvents for the generated log group;
+# secretsmanager:GetSecretValue for the two Kafka secrets;
+# kms:Decrypt if the secrets use a customer-managed KMS key.
+# The deploying principal needs iam:PassRole for this existing role.
+Parameters:
+  ExistingLambdaRoleArn:
+    Type: String
+    AllowedPattern: 'arn:[^:]+:iam::[0-9]{12}:role/.+'
+    Description: Existing Lambda execution role ARN in this account. Its permissions are not changed.
+  CodeBucket:
+    Type: String
+    Default: s3-source-bucket-nfee
+  CodeKey:
+    Type: String
+    Default: news-feed/kafka-consumer/lambda-consumer-v2.zip
+  CodeObjectVersion:
+    Type: String
+    Default: ''
+    Description: Optional S3 object version. Change this or CodeKey to deploy new code.
+  KafkaBootstrapServers:
+    Type: CommaDelimitedList
+    Default: kafka-webapp-adapham712-1bb4.k.aivencloud.com:20495
+  KafkaTopic:
+    Type: String
+    Default: newsfeed.events
+    MinLength: 1
+  KafkaConsumerGroup:
+    Type: String
+    Default: newsfeed-lambda-consumer
+    MinLength: 1
+    Description: Dedicated consumer group. Existing committed offsets take precedence over StartingPosition.
+  KafkaCredentialsSecretArn:
+    Type: String
+    AllowedPattern: 'arn:[^:]+:secretsmanager:ap-southeast-1:[0-9]{12}:secret:.+'
+    Description: Existing secret in ap-southeast-1 with username and password JSON fields.
+  KafkaCaSecretArn:
+    Type: String
+    AllowedPattern: 'arn:[^:]+:secretsmanager:ap-southeast-1:[0-9]{12}:secret:.+'
+    Description: Existing secret in ap-southeast-1 with certificate field containing ca.pem text.
+  TriggerEnabled:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Set false to create the trigger without consuming messages yet.
+  StartingPosition:
+    Type: String
+    Default: TRIM_HORIZON
+    AllowedValues: [TRIM_HORIZON, LATEST]
+    Description: TRIM_HORIZON reads retained history for a new group; LATEST reads new messages.
+
+Conditions:
+  HasCodeVersion: !Not [!Equals [!Ref CodeObjectVersion, '']]
+  EnableTrigger: !Equals [!Ref TriggerEnabled, 'true']
+
+Resources:
+  ConsumerLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RetentionInDays: 14
+
+  ConsumerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: news-feed-kafka-consumer
+      Description: Consumes plain JSON outbox events from Aiven Kafka.
+      Runtime: python3.12
+      Architectures: [x86_64]
+      Handler: lambda_function.lambda_handler
+      Role: !Ref ExistingLambdaRoleArn
+      MemorySize: 256
+      Timeout: 60
+      LoggingConfig:
+        LogGroup: !Ref ConsumerLogGroup
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CodeKey
+        S3ObjectVersion: !If
+          - HasCodeVersion
+          - !Ref CodeObjectVersion
+          - !Ref AWS::NoValue
+
+  KafkaEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      FunctionName: !Ref ConsumerFunction
+      Enabled: !If [EnableTrigger, true, false]
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 1
+      StartingPosition: !Ref StartingPosition
+      Topics:
+        - !Ref KafkaTopic
+      SelfManagedEventSource:
+        Endpoints:
+          KafkaBootstrapServers: !Ref KafkaBootstrapServers
+      SelfManagedKafkaEventSourceConfig:
+        ConsumerGroupId: !Ref KafkaConsumerGroup
+      SourceAccessConfigurations:
+        - Type: BASIC_AUTH
+          URI: !Ref KafkaCredentialsSecretArn
+        - Type: SERVER_ROOT_CA_CERTIFICATE
+          URI: !Ref KafkaCaSecretArn
+      # Public brokers: no customer VPC configuration or provisioned pollers.
+      # All advertised brokers must be publicly reachable and pass TLS checks.
+
+Outputs:
+  FunctionName:
+    Value: !Ref ConsumerFunction
+  FunctionArn:
+    Value: !GetAtt ConsumerFunction.Arn
+  EventSourceMappingId:
+    Value: !Ref KafkaEventSourceMapping
+  LogGroupName:
+    Value: !Ref ConsumerLogGroup
