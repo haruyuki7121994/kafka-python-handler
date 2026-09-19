@@ -64,27 +64,52 @@ class FakeSQS:
 class ConsumerTests(unittest.TestCase):
     def test_normal_author_is_split_into_500_follower_tasks(self):
         dynamo, sqs = FakeDynamo(1001, 1001), FakeSQS()
-        with patch.object(consumer, "_dynamodb", dynamo), patch.object(consumer, "_sqs", sqs):
+        with patch.object(consumer, "_dynamodb", dynamo), patch.object(consumer, "_sqs", sqs), \
+                patch.object(consumer.fanout_state, "status", return_value=None), \
+                patch.object(consumer.fanout_state, "prepare") as prepare, \
+                patch.object(consumer.fanout_state, "scheduled") as scheduled:
             result = consumer.lambda_handler(kafka_event(), None)
+        self.assertEqual(prepare.call_args.args[:2], ("EVENT#1", 3))
+        self.assertEqual(len(prepare.call_args.args[2]), 64)
+        scheduled.assert_called_once_with("EVENT#1")
         self.assertEqual(result, {"processed": 1})
         tasks = [json.loads(entry["MessageBody"]) for entry in sqs.entries]
         self.assertEqual([len(task["followerIds"]) for task in tasks], [500, 500, 1])
         self.assertEqual(tasks[0]["followerIds"][0], "USER#0")
         self.assertEqual(tasks[-1]["followerIds"][-1], "USER#1000")
+        self.assertEqual([task["taskId"] for task in tasks], ["0", "1", "2"])
         self.assertGreater(dynamo.query_calls, 1)
 
     def test_celebrity_does_not_enqueue_fanout(self):
         dynamo, sqs = FakeDynamo(100001, 0), FakeSQS()
-        with patch.object(consumer, "_dynamodb", dynamo), patch.object(consumer, "_sqs", sqs):
+        with patch.object(consumer, "_dynamodb", dynamo), patch.object(consumer, "_sqs", sqs), \
+                patch.object(consumer.fanout_state, "status", return_value=None), \
+                patch.object(consumer.fanout_state, "mark_read") as mark_read:
             self.assertEqual(consumer.lambda_handler(kafka_event(), None), {"processed": 1})
+        mark_read.assert_called_once_with("EVENT#1")
         self.assertEqual(dynamo.query_calls, 0)
+        self.assertEqual(sqs.entries, [])
+
+    def test_zero_followers_still_completes_fanout_plan(self):
+        dynamo, sqs = FakeDynamo(0, 0), FakeSQS()
+        with patch.object(consumer, "_dynamodb", dynamo), patch.object(consumer, "_sqs", sqs), \
+                patch.object(consumer.fanout_state, "status", return_value=None), \
+                patch.object(consumer.fanout_state, "prepare") as prepare, \
+                patch.object(consumer.fanout_state, "scheduled") as scheduled:
+            self.assertEqual(consumer.lambda_handler(kafka_event(), None), {"processed": 1})
+        self.assertEqual(prepare.call_args.args[:2], ("EVENT#1", 0))
+        scheduled.assert_called_once_with("EVENT#1")
         self.assertEqual(sqs.entries, [])
 
     def test_sqs_partial_failure_does_not_acknowledge_kafka_batch(self):
         dynamo, sqs = FakeDynamo(1, 1), FakeSQS(fail=True)
-        with patch.object(consumer, "_dynamodb", dynamo), patch.object(consumer, "_sqs", sqs):
+        with patch.object(consumer, "_dynamodb", dynamo), patch.object(consumer, "_sqs", sqs), \
+                patch.object(consumer.fanout_state, "status", return_value=None), \
+                patch.object(consumer.fanout_state, "prepare"), \
+                patch.object(consumer.fanout_state, "scheduled") as scheduled:
             with self.assertRaises(RuntimeError):
                 consumer.lambda_handler(kafka_event(), None)
+        scheduled.assert_not_called()
 
 
 if __name__ == "__main__":

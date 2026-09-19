@@ -6,10 +6,15 @@ Workers must therefore make each postId/followerId write idempotent.
 
 import base64
 import json
+import hashlib
 import logging
 import os
 
 import boto3
+try:
+    from . import fanout_state  # Local tests import lambdas as a namespace package.
+except ImportError:
+    import fanout_state  # Lambda ZIP places modules at its root.
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
@@ -88,10 +93,16 @@ def process_event(event):
     if not all(isinstance(value, str) and value for value in (author_id, post_id, created_at)):
         raise ValueError("POST_CREATED needs authorId, postId and createdAt")
 
-    count = _followers_count(author_id)
+    current = fanout_state.status(event["eventId"])
+    if current in ("COMPLETED", "FAILED", "FANOUT_ON_READ"):
+        return
+    if current not in (None, "IN_PROGRESS"):
+        raise ValueError(f"Unexpected fanoutStatus {current} for {event['eventId']}")
+    count = _followers_count(author_id) if current is None else None
     threshold = int(os.environ.get("CELEBRITY_THRESHOLD", "100000"))
-    if count > threshold:
+    if current is None and count > threshold:
         # The feed read path will fetch this author's posts from the posts store.
+        fanout_state.mark_read(event["eventId"])
         log.info("Fanout-on-read eventId=%s authorId=%s followersCount=%s", event["eventId"], author_id, count)
         return
 
@@ -100,31 +111,31 @@ def process_event(event):
         raise ValueError("FANOUT_BATCH_SIZE must be between 1 and 500")
 
     follower_batch = []
-    sqs_batch = []
-    task_count = 0
+    tasks = []
     for follower_id in _follower_ids(author_id):
         follower_batch.append(follower_id)
         if len(follower_batch) == batch_size:
-            sqs_batch.append({
+            tasks.append({
                 "eventId": event["eventId"], "postId": post_id,
                 "authorId": author_id, "createdAt": created_at,
                 "followerIds": follower_batch,
             })
             follower_batch = []
-        if len(sqs_batch) == 10:
-            _send_tasks(sqs_batch)
-            task_count += len(sqs_batch)
-            sqs_batch = []
 
     if follower_batch:
-        sqs_batch.append({
+        tasks.append({
             "eventId": event["eventId"], "postId": post_id,
             "authorId": author_id, "createdAt": created_at,
             "followerIds": follower_batch,
         })
-    _send_tasks(sqs_batch)
-    task_count += len(sqs_batch)
-    log.info("Enqueued fanout eventId=%s authorId=%s tasks=%s", event["eventId"], author_id, task_count)
+    for index, task in enumerate(tasks):
+        task["taskId"] = str(index)
+    plan_hash = hashlib.sha256(json.dumps(tasks, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    fanout_state.prepare(event["eventId"], len(tasks), plan_hash)
+    for offset in range(0, len(tasks), 10):
+        _send_tasks(tasks[offset:offset + 10])
+    fanout_state.scheduled(event["eventId"])
+    log.info("Enqueued fanout eventId=%s authorId=%s tasks=%s", event["eventId"], author_id, len(tasks))
 
 
 def lambda_handler(event, context):

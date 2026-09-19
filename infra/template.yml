@@ -4,12 +4,14 @@ Description: Python Lambda producer and consumer for the news feed Kafka topic. 
 # Uses an existing role; this template creates or modifies no IAM resources.
 # The role must trust lambda.amazonaws.com and already allow:
 # logs:CreateLogStream, logs:PutLogEvents for the generated log group;
-# secretsmanager:GetSecretValue for the two Kafka secrets;
-# dynamodb:GetItem, dynamodb:UpdateItem on the outboxes table;
+# secretsmanager:GetSecretValue for the Kafka and Redis secrets;
+# dynamodb:GetItem, dynamodb:UpdateItem, dynamodb:PutItem,
+# dynamodb:TransactWriteItems on the outboxes table;
 # dynamodb:DescribeStream, dynamodb:GetRecords, dynamodb:GetShardIterator,
 # dynamodb:ListStreams on the outboxes stream;
 # dynamodb:GetItem on the users table and dynamodb:Query on the followers table;
 # sqs:SendMessage on the fanout queue;
+# sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes on the fanout queue;
 # kms:Decrypt if the secrets use a customer-managed KMS key.
 # The deploying principal needs iam:PassRole for this existing role.
 Parameters:
@@ -66,6 +68,10 @@ Parameters:
     Type: String
     AllowedPattern: 'arn:[^:]+:secretsmanager:ap-southeast-1:[0-9]{12}:secret:.+'
     Description: Existing secret in ap-southeast-1 with certificate field containing ca.pem text.
+  RedisSecretArn:
+    Type: String
+    AllowedPattern: 'arn:[^:]+:secretsmanager:ap-southeast-1:[0-9]{12}:secret:.+'
+    Description: Existing JSON secret with host, port, password, optional username and ssl.
   TriggerEnabled:
     Type: String
     Default: 'true'
@@ -95,7 +101,7 @@ Resources:
       MessageRetentionPeriod: 86400
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt FanoutDeadLetterQueue.Arn
-        maxReceiveCount: 5
+        maxReceiveCount: 3
 
   ProducerLogGroup:
     Type: AWS::Logs::LogGroup
@@ -164,6 +170,7 @@ Resources:
         Variables:
           USERS_TABLE_NAME: !Ref UsersTableName
           FOLLOWERS_TABLE_NAME: !Ref FollowersTableName
+          OUTBOX_TABLE_NAME: !Ref OutboxTableName
           FANOUT_QUEUE_URL: !Ref FanoutQueue
           CELEBRITY_THRESHOLD: !Ref CelebrityThreshold
           FANOUT_BATCH_SIZE: !Ref FanoutBatchSize
@@ -194,6 +201,47 @@ Resources:
       # Public brokers: no customer VPC configuration or provisioned pollers.
       # All advertised brokers must be publicly reachable and pass TLS checks.
 
+  WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RetentionInDays: 14
+
+  WorkerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: news-feed-fanout-worker
+      Description: Writes fanout tasks to Redis and tracks outbox fanout completion.
+      Runtime: python3.12
+      Architectures: [x86_64]
+      Handler: lambda_function_worker.lambda_handler
+      Role: !Ref ExistingLambdaRoleArn
+      MemorySize: 256
+      Timeout: 60
+      LoggingConfig:
+        LogGroup: !Ref WorkerLogGroup
+      Environment:
+        Variables:
+          OUTBOX_TABLE_NAME: !Ref OutboxTableName
+          REDIS_SECRET_ARN: !Ref RedisSecretArn
+          FEED_MAX_ENTRIES: '1000'
+          FEED_TTL_SECONDS: '2592000'
+          OUTBOX_SUCCESS_TTL_DAYS: '7'
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Sub 'news-feed/kafka/deploy/${DeploymentVersion}.zip'
+
+  FanoutEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt FanoutQueue.Arn
+      FunctionName: !Ref WorkerFunction
+      BatchSize: 1
+      FunctionResponseTypes: [ReportBatchItemFailures]
+      ScalingConfig:
+        MaximumConcurrency: 10
+
 Outputs:
   FanoutQueueUrl:
     Value: !Ref FanoutQueue
@@ -217,3 +265,9 @@ Outputs:
     Value: !Ref KafkaEventSourceMapping
   LogGroupName:
     Value: !Ref ConsumerLogGroup
+  WorkerFunctionName:
+    Value: !Ref WorkerFunction
+  WorkerLogGroupName:
+    Value: !Ref WorkerLogGroup
+  FanoutEventSourceMappingId:
+    Value: !Ref FanoutEventSourceMapping

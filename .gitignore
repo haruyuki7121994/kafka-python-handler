@@ -30,3 +30,5 @@ build/
 /ca.pem
 /kafka-ca-secret.json
 /deploy-command.sh
+__pycache__/
+*.pyc

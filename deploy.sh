@@ -10,6 +10,7 @@ aws_region="${AWS_REGION:-ap-southeast-1}"
 : "${OUTBOX_STREAM_ARN:?Set OUTBOX_STREAM_ARN to the DynamoDB outboxes stream ARN}"
 : "${KAFKA_CREDENTIALS_SECRET_ARN:?Set KAFKA_CREDENTIALS_SECRET_ARN}"
 : "${KAFKA_CA_SECRET_ARN:?Set KAFKA_CA_SECRET_ARN}"
+: "${REDIS_SECRET_ARN:?Set REDIS_SECRET_ARN}"
 
 for command_name in aws python3 zip; do
     command -v "$command_name" >/dev/null || {
@@ -60,6 +61,7 @@ aws cloudformation deploy \
         "OutboxStreamArn=${OUTBOX_STREAM_ARN}" \
         "KafkaCredentialsSecretArn=${KAFKA_CREDENTIALS_SECRET_ARN}" \
         "KafkaCaSecretArn=${KAFKA_CA_SECRET_ARN}" \
+        "RedisSecretArn=${REDIS_SECRET_ARN}" \
     --no-fail-on-empty-changeset
 
 echo "Deployed version ${version}: s3://${CODE_BUCKET}/${s3_key}"
