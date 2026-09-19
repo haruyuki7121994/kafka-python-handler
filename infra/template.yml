@@ -85,14 +85,14 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub '${AWS::StackName}-fanout-dlq'
-      MessageRetentionPeriod: 1209600
+      MessageRetentionPeriod: 86400
 
   FanoutQueue:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub '${AWS::StackName}-fanout'
       VisibilityTimeout: 360
-      MessageRetentionPeriod: 1209600
+      MessageRetentionPeriod: 86400
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt FanoutDeadLetterQueue.Arn
         maxReceiveCount: 5
@@ -102,7 +102,7 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      RetentionInDays: 14
+      RetentionInDays: 7
 
   ProducerFunction:
     Type: AWS::Lambda::Function
