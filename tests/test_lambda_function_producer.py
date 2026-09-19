@@ -8,7 +8,7 @@ os.environ.setdefault("AWS_EC2_METADATA_DISABLED", "true")
 os.environ.setdefault("OUTBOX_TABLE_NAME", "outboxes")
 os.environ.setdefault("KAFKA_TOPIC", "newsfeed.events")
 
-import lambda_function_producer as producer
+from lambdas import lambda_function_producer as producer
 
 
 def stream_record():

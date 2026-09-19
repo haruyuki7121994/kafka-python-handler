@@ -18,20 +18,10 @@ Parameters:
   CodeBucket:
     Type: String
     Default: s3-source-bucket-nfee
-  CodeKey:
+  DeploymentVersion:
     Type: String
-    Default: news-feed/kafka-consumer/lambda-consumer-v2.zip
-  CodeObjectVersion:
-    Type: String
-    Default: ''
-    Description: Optional S3 object version. Change this or CodeKey to deploy new code.
-  ProducerCodeKey:
-    Type: String
-    Default: news-feed/kafka-producer/lambda-producer-v1.zip
-  ProducerCodeObjectVersion:
-    Type: String
-    Default: ''
-    Description: Optional S3 object version for producer code.
+    AllowedPattern: '[0-9]{13}'
+    Description: Millisecond timestamp used as the ZIP name under news-feed/kafka/deploy/.
   OutboxStreamArn:
     Type: String
     AllowedPattern: 'arn:[^:]+:dynamodb:ap-southeast-1:[0-9]{12}:table/outboxes/stream/.+'
@@ -71,8 +61,6 @@ Parameters:
     Description: TRIM_HORIZON reads retained history for a new group; LATEST reads new messages.
 
 Conditions:
-  HasCodeVersion: !Not [!Equals [!Ref CodeObjectVersion, '']]
-  HasProducerCodeVersion: !Not [!Equals [!Ref ProducerCodeObjectVersion, '']]
   EnableTrigger: !Equals [!Ref TriggerEnabled, 'true']
 
 Resources:
@@ -105,11 +93,7 @@ Resources:
           KAFKA_CA_SECRET_ARN: !Ref KafkaCaSecretArn
       Code:
         S3Bucket: !Ref CodeBucket
-        S3Key: !Ref ProducerCodeKey
-        S3ObjectVersion: !If
-          - HasProducerCodeVersion
-          - !Ref ProducerCodeObjectVersion
-          - !Ref AWS::NoValue
+        S3Key: !Sub 'news-feed/kafka/deploy/${DeploymentVersion}.zip'
 
   OutboxEventSourceMapping:
     Type: AWS::Lambda::EventSourceMapping
@@ -137,7 +121,7 @@ Resources:
       Description: Consumes plain JSON outbox events from Aiven Kafka.
       Runtime: python3.12
       Architectures: [x86_64]
-      Handler: lambda_function.lambda_handler
+      Handler: lambda_function_consumer.lambda_handler
       Role: !Ref ExistingLambdaRoleArn
       MemorySize: 256
       Timeout: 60
@@ -145,11 +129,7 @@ Resources:
         LogGroup: !Ref ConsumerLogGroup
       Code:
         S3Bucket: !Ref CodeBucket
-        S3Key: !Ref CodeKey
-        S3ObjectVersion: !If
-          - HasCodeVersion
-          - !Ref CodeObjectVersion
-          - !Ref AWS::NoValue
+        S3Key: !Sub 'news-feed/kafka/deploy/${DeploymentVersion}.zip'
 
   KafkaEventSourceMapping:
     Type: AWS::Lambda::EventSourceMapping
