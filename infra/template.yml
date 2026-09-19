@@ -1,10 +1,13 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Python Lambda consumer for public Aiven Kafka using SASL PLAIN over TLS. Deploy in ap-southeast-1.
+Description: Python Lambda producer and consumer for the news feed Kafka topic. Deploy in ap-southeast-1.
 
 # Uses an existing role; this template creates or modifies no IAM resources.
 # The role must trust lambda.amazonaws.com and already allow:
 # logs:CreateLogStream, logs:PutLogEvents for the generated log group;
 # secretsmanager:GetSecretValue for the two Kafka secrets;
+# dynamodb:GetItem, dynamodb:UpdateItem on the outboxes table;
+# dynamodb:DescribeStream, dynamodb:GetRecords, dynamodb:GetShardIterator,
+# dynamodb:ListStreams on the outboxes stream;
 # kms:Decrypt if the secrets use a customer-managed KMS key.
 # The deploying principal needs iam:PassRole for this existing role.
 Parameters:
@@ -22,6 +25,20 @@ Parameters:
     Type: String
     Default: ''
     Description: Optional S3 object version. Change this or CodeKey to deploy new code.
+  ProducerCodeKey:
+    Type: String
+    Default: news-feed/kafka-producer/lambda-producer-v1.zip
+  ProducerCodeObjectVersion:
+    Type: String
+    Default: ''
+    Description: Optional S3 object version for producer code.
+  OutboxStreamArn:
+    Type: String
+    AllowedPattern: 'arn:[^:]+:dynamodb:ap-southeast-1:[0-9]{12}:table/outboxes/stream/.+'
+    Description: EventSourceArn output from the news-feed DynamoDB stack.
+  OutboxTableName:
+    Type: String
+    Default: outboxes
   KafkaBootstrapServers:
     Type: CommaDelimitedList
     Default: kafka-webapp-adapham712-1bb4.k.aivencloud.com:20495
@@ -55,9 +72,57 @@ Parameters:
 
 Conditions:
   HasCodeVersion: !Not [!Equals [!Ref CodeObjectVersion, '']]
+  HasProducerCodeVersion: !Not [!Equals [!Ref ProducerCodeObjectVersion, '']]
   EnableTrigger: !Equals [!Ref TriggerEnabled, 'true']
 
 Resources:
+  ProducerLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RetentionInDays: 14
+
+  ProducerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: news-feed-kafka-producer
+      Description: Publishes DynamoDB outbox INSERT events to Aiven Kafka.
+      Runtime: python3.12
+      Architectures: [x86_64]
+      Handler: lambda_function_producer.lambda_handler
+      Role: !Ref ExistingLambdaRoleArn
+      MemorySize: 256
+      Timeout: 120
+      LoggingConfig:
+        LogGroup: !Ref ProducerLogGroup
+      Environment:
+        Variables:
+          OUTBOX_TABLE_NAME: !Ref OutboxTableName
+          KAFKA_BOOTSTRAP_SERVERS: !Join [',', !Ref KafkaBootstrapServers]
+          KAFKA_TOPIC: !Ref KafkaTopic
+          KAFKA_CREDENTIALS_SECRET_ARN: !Ref KafkaCredentialsSecretArn
+          KAFKA_CA_SECRET_ARN: !Ref KafkaCaSecretArn
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref ProducerCodeKey
+        S3ObjectVersion: !If
+          - HasProducerCodeVersion
+          - !Ref ProducerCodeObjectVersion
+          - !Ref AWS::NoValue
+
+  OutboxEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !Ref OutboxStreamArn
+      FunctionName: !Ref ProducerFunction
+      StartingPosition: TRIM_HORIZON
+      BatchSize: 1
+      FunctionResponseTypes: [ReportBatchItemFailures]
+      FilterCriteria:
+        Filters:
+          - Pattern: '{"eventName":["INSERT"]}'
+
   ConsumerLogGroup:
     Type: AWS::Logs::LogGroup
     DeletionPolicy: Retain
@@ -110,6 +175,14 @@ Resources:
       # All advertised brokers must be publicly reachable and pass TLS checks.
 
 Outputs:
+  ProducerFunctionName:
+    Value: !Ref ProducerFunction
+  ProducerFunctionArn:
+    Value: !GetAtt ProducerFunction.Arn
+  OutboxEventSourceMappingId:
+    Value: !Ref OutboxEventSourceMapping
+  ProducerLogGroupName:
+    Value: !Ref ProducerLogGroup
   FunctionName:
     Value: !Ref ConsumerFunction
   FunctionArn:
